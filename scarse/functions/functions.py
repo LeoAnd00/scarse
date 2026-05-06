@@ -44,7 +44,8 @@ class ModelOptimization:
         score_col = ["score"],
         random_seed=42,
         emb_batch_size=64,
-        classification=False):
+        classification=False,
+        foundation="facebook/esm2_t33_650M_UR50D"):
         """
         Initialize the model optimization framework.
 
@@ -68,6 +69,8 @@ class ModelOptimization:
         classification : bool, default=False
             Whether the task is a classification problem. If False, the
             framework performs regression.
+        foundation : str, default="facebook/esm2_t33_650M_UR50D"
+            Specify which foundation model to use.
         """
 
         # Parameters
@@ -76,7 +79,7 @@ class ModelOptimization:
         self.emb_batch_size = emb_batch_size
         self.seq_col = seq_col
         self.score_col = score_col
-        self.model_name = "facebook/esm2_t33_650M_UR50D"
+        self.model_name = foundation
         self.classification = classification
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
@@ -155,8 +158,6 @@ class ModelOptimization:
         else:
             self.seq_to_score = dict(zip(df[seq_col], df[score_col].values.tolist()))
 
-        print("Finished preparing data!")
-
     def load_model(self):
         """
         Load the pretrained protein language model used for embeddings.
@@ -172,8 +173,6 @@ class ModelOptimization:
         ``models/esm-model``.
         - The model is only used for feature extraction (no gradient updates).
         """
-        
-        print(f"Loading base pretrained ESM model: {self.model_name}")
         model_source = self.model_name
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_source, use_fast=False)
@@ -181,8 +180,6 @@ class ModelOptimization:
 
         self.model = self.model.to(self.device)
         self.model.eval()
-
-        print("ESM model loaded. Using device:", self.device)
 
 
     def compute_embeddings(self, 
@@ -239,7 +236,7 @@ class ModelOptimization:
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
 
-            last_layer = hidden_states[-1:] # (Can easily change if one wants to try to use multiple layers)
+            last_layer = hidden_states[-1:] 
             stacked = torch.stack(last_layer, dim=0) 
             mean_layers = stacked.mean(dim=0)
 
@@ -402,7 +399,6 @@ class ModelOptimization:
         warnings.filterwarnings('ignore', category=ConvergenceWarning)
         warnings.filterwarnings('ignore', category=UserWarning)
         
-
         ## Seed
         random.seed(random_seed)
         np.random.seed(random_seed)
@@ -504,10 +500,8 @@ class ModelOptimization:
         # Iterate over targets and models
         for label_idx in range(n_targets):
 
-            print(f"\nOptimizing models for target {self.target_names[label_idx]} {label_idx + 1}/{n_targets}...")
-            name = top_model
             cfg = model_configs[top_model]
-            self.current_name = name
+            self.current_name = top_model
 
             ModelClass = cfg["class"]
             param_bounds = cfg["params"]
