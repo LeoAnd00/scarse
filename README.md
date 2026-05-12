@@ -89,5 +89,15 @@ df_pred = scarse.pred(data_path="../app/test.csv", seq_col="sequence")
 See the following tutorial, structured as a Python notebook:
 * [tutorial.ipynb](tutorial.ipynb)
 
+## Correlate to active learning end-point performance 
+Below we illustrate the relation between CV R² score and end-point active learning performance. <br>
+The y-axis display how many times better performance SCARSE guided active learning delivers compared to random sampling when looking at the accumulation of top 10% of peptides. <br>
+By comparing the CV R² score of your data to the corresponding figure below for your dataset size one can get and indication of how suitable your data is combined with SCARSE to perform active learning peptide engineering. <br>
+Note that this can only be used as a guide to evaluate regression problem performance. <br>
+
+<p align="center">
+  <img src="figures/active_learning_performance.png" alt="Workflow Diagram" width="500"/>
+</p>
+
 ## Citation
 Coming soon!
