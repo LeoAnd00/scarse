@@ -25,6 +25,7 @@ from sklearn.metrics import (
     matthews_corrcoef,
     roc_auc_score
 )
+from scipy.stats import spearmanr
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler, LabelEncoder, label_binarize
 from sklearn.exceptions import ConvergenceWarning
@@ -573,11 +574,13 @@ class ModelOptimization:
                         mse = mean_squared_error(y_vall_all, y_pred_all)
 
                         if mse < self.mse_tracker:
+                            rho, p = spearmanr(y_vall_all, y_pred_all)
                             self.final_metrics[self.target_names[label_idx]] = {
                                 "MSE": float(mse),
                                 "RMSE": float(np.sqrt(mse)),
                                 "MAE": float(mean_absolute_error(y_vall_all, y_pred_all)),
-                                "R2": float(r2_score(y_vall_all, y_pred_all))
+                                "R2": float(r2_score(y_vall_all, y_pred_all)),
+                                "Spearman correlation": float(rho)
                             }
                             self.mse_tracker = mse
 
