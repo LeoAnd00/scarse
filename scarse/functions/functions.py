@@ -126,7 +126,8 @@ class ModelOptimization:
         """
         if self.data_path.endswith((".xlsx", ".xls")):
             df = pd.read_excel(self.data_path)
-        df = pd.read_csv(self.data_path, sep=None, engine='python')
+        else:
+            df = pd.read_csv(self.data_path, sep=None, engine='python')
         required_cols = set([seq_col] + score_col)
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Input file must contain columns: {required_cols}. Found: {df.columns.tolist()}")
