@@ -682,8 +682,10 @@ class ModelOptimization:
 
             - Predicted numeric score for each target.
         """
-
-        df = pd.read_csv(test_seqs_path, sep=None, engine='python')
+        if test_seqs_path.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(test_seqs_path)
+        else:
+            df = pd.read_csv(test_seqs_path, sep=None, engine="python")
         required_cols = set([seq_col])
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Input file must contain columns: {required_cols}. Found: {df.columns.tolist()}")
