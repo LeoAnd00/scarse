@@ -62,7 +62,6 @@ def train(data_path,
     global scarse_env
 
     try:
-        #df = pd.read_csv(data_path)
         if data_path.endswith((".xlsx", ".xls")):
             df = pd.read_excel(data_path)
         df = pd.read_csv(data_path, sep=None, engine="python")
