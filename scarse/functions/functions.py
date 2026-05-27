@@ -124,6 +124,8 @@ class ModelOptimization:
         - Supports both single-target and multi-target prediction.
         - Classification targets are automatically label encoded.
         """
+        if self.data_path.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(self.data_path)
         df = pd.read_csv(self.data_path, sep=None, engine='python')
         required_cols = set([seq_col] + score_col)
         if not required_cols.issubset(df.columns):
@@ -155,9 +157,9 @@ class ModelOptimization:
 
         # Create a mapping from sequence → list of scores if multiple columns
         if len(score_col) == 1:
-            self.seq_to_score = dict(zip(df[seq_col], df[score_col[0]]))
+            self.seq_to_score = dict(zip(df["sequence"], df[score_col[0]]))
         else:
-            self.seq_to_score = dict(zip(df[seq_col], df[score_col].values.tolist()))
+            self.seq_to_score = dict(zip(df["sequence"], df[score_col].values.tolist()))
 
     def load_model(self):
         """
