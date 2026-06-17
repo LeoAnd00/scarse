@@ -79,7 +79,7 @@ class ModelOptimization:
         self.random_seed = random_seed
         self.emb_batch_size = emb_batch_size
         self.seq_col = seq_col
-        self.score_col = score_col
+        self.score_col = [score_col] if isinstance(score_col, str) else score_col
         self.model_name = foundation
         self.classification = classification
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

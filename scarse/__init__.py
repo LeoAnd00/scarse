@@ -1,4 +1,6 @@
 from .functions import functions as scarse
+from .functions.validate_sequences import validate_sequences
+from .functions.validate_training_targets import validate_training_targets
 import pandas as pd
 
 scarse_env = None
@@ -61,38 +63,9 @@ def train(data_path,
     
     global scarse_env
 
-    try:
-        if data_path.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(data_path)
-        else:
-            df = pd.read_csv(data_path, sep=None, engine="python")
-    except Exception as e:
-        raise ValueError(f"Failed to read CSV file at '{data_path}': {e}")
+    validate_sequences(data_path, seq_col)
 
-    # Check required columns exist
-    missing_cols = []
-    if seq_col not in df.columns:
-        missing_cols.append(seq_col)
-
-    if isinstance(score_col, list):
-        for col in score_col:
-            if col not in df.columns:
-                missing_cols.append(col)
-
-    if missing_cols:
-        raise ValueError(f"Missing required column(s): {missing_cols}")
-    
-    # Check for empty or null sequences
-    if df[seq_col].isnull().any():
-        raise ValueError(f"Column '{seq_col}' contains missing (NaN) values.")
-
-    if (df[seq_col].astype(str).str.strip() == "").any():
-        raise ValueError(f"Column '{seq_col}' contains empty sequences.")
-    
-    target_cols = score_col if isinstance(score_col, list) else [score_col]
-    for col in target_cols:
-        if df[col].isnull().any():
-            raise ValueError(f"Target column '{col}' contains missing (NaN) values.")
+    validate_training_targets(data_path, score_col, classification)
 
     scarse_env = scarse.ModelOptimization(data_path=data_path, 
                                           seq_col=seq_col,
@@ -141,6 +114,8 @@ def pred(data_path,
     global scarse_env
     if scarse_env is None:
         raise RuntimeError("You must call train() before pred().")
+    
+    validate_sequences(data_path, seq_col)
 
     df_pred = scarse_env.pred(data_path, seq_col)
 
