@@ -1,6 +1,6 @@
 # SCARSE: Small-sample Classification And Regression Solution for low-resource peptide Engineering
 <p align="center">
-  <img src="figures/scarse_banner.png" alt="Workflow Diagram" width="800"/>
+  <img src="figures/scarse_banner.png" alt="Workflow Diagram" style="width: 100%; height: auto;" />
 </p>
 
 ## Abstract
