@@ -24,7 +24,7 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
     ],
-    python_requires=">=3.12.10",
+    python_requires=">=3.12",
     packages=find_packages(),
     install_requires=install_requires,
 )
