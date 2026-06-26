@@ -1,13 +1,14 @@
 from pathlib import Path
-import sys
 from setuptools import setup, find_packages
 
-with open("README.md", "r") as f:
+HERE = Path(__file__).parent.resolve()
+
+with open(HERE / "README.md", "r", encoding="utf-8") as f:
     description = f.read()
 
-install_requires=[
-    l.strip() for l in Path('requirements.txt').read_text('utf-8').splitlines()
-    if l.strip() and not l.startswith("--")  # Ignore empty lines and options like --extra-index-url
+install_requires = [
+    l.strip() for l in (HERE / "requirements.txt").read_text("utf-8").splitlines()
+    if l.strip() and not l.startswith("--")
 ]
 
 setup(
@@ -22,7 +23,6 @@ setup(
     license="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
     ],
     python_requires=">=3.12",
     packages=find_packages(),
