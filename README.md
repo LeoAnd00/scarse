@@ -107,4 +107,6 @@ Note that this can only be used as a guide to evaluate regression problem perfor
 </p>
 
 ## Citation
-Coming soon!
+If using this work, please cite: <br>
+Andrekson L, Rydbergh R, Mercado R, Wenzel M. AI-guided discovery for low-resource peptide engineering using evolutionary scale modeling. bioRxiv. 2026. https://doi.org/10.64898/2026.06.25.734678.
+
