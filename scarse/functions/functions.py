@@ -1,12 +1,13 @@
 import random
 import warnings
+import time
 import numpy as np
 import gc
 import pandas as pd
 import torch
 import optuna
+import scipy.optimize
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.gaussian_process.kernels import (
     RBF,
     Matern,
@@ -17,26 +18,64 @@ from sklearn.base import clone
 from sklearn.metrics import (
     mean_squared_error,
     mean_absolute_error,
-    r2_score,
-    log_loss,
-    accuracy_score,
-    balanced_accuracy_score,
-    f1_score,
-    matthews_corrcoef,
-    roc_auc_score
+    r2_score
 )
 from scipy.stats import spearmanr
-from sklearn.model_selection import KFold, StratifiedKFold
-from sklearn.preprocessing import StandardScaler, LabelEncoder, label_binarize
+from sklearn.model_selection import KFold
+from sklearn.preprocessing import StandardScaler
 from sklearn.exceptions import ConvergenceWarning
 from transformers import AutoTokenizer, EsmModel
 
+
+# ----------------------------------------------------------------------
+# Optuna run-time limits for the GPR hyperparameter search
+# ----------------------------------------------------------------------
+# A single GPR fit can occasionally get stuck optimising its kernel
+# hyperparameters. Two optional wall-clock limits keep that from stalling the
+# whole optimisation, without changing any result unless a limit is reached:
+#
+#   trial_timeout - seconds one Optuna trial (all CV folds) may take. Checked
+#                   inside the kernel optimiser, so it also interrupts a single
+#                   fit that is stuck. The trial is then discarded (pruned).
+#   study_timeout - seconds the whole Optuna study may take. When reached, no
+#                   new trials start and the best trial so far is used.
+#
+# Both default to None (no limit). Every time a limit is reached it is printed,
+# so it can be reported.
+
+#: Deadline (time.monotonic()) for the trial currently being evaluated, or None.
+#: Module level on purpose: sklearn's clone() deep-copies estimator parameters,
+#: so a deadline stored on the optimiser object would not reach the clones.
+_FIT_DEADLINE = None
+
+
+class _TrialTimeLimitExceeded(Exception):
+    """Raised inside a GPR fit when the current Optuna trial runs out of time."""
+
+
+def _time_limited_lbfgs(obj_func, initial_theta, bounds):
+    """sklearn's default GPR optimiser (L-BFGS-B), plus the trial deadline.
+
+    Makes exactly the call sklearn's built-in ``fmin_l_bfgs_b`` makes, so the
+    fit is identical when no deadline is set.
+    """
+    def wrapped(theta, *args, **kwargs):
+        if _FIT_DEADLINE is not None and time.monotonic() > _FIT_DEADLINE:
+            raise _TrialTimeLimitExceeded()
+        return obj_func(theta, *args, **kwargs)
+
+    res = scipy.optimize.minimize(wrapped, initial_theta, method="L-BFGS-B",
+                                  jac=True, bounds=bounds)
+    return res.x, res.fun
+
+
 class ModelOptimization:
     """
-    End-to-end framework for training and optimizing SCARSE on peptide sequence datasets using ESM-2 embeddings.
+    End-to-end framework for training and optimizing SCARSE on peptide sequence
+    datasets using ESM-2 embeddings.
 
-    The framework supports both regression and classification tasks
-    with automated hyperparameter optimization using Optuna.
+    The framework performs regression with automated hyperparameter
+    optimization using Optuna.
     """
     def __init__(
         self,
@@ -45,7 +84,6 @@ class ModelOptimization:
         score_col = ["score"],
         random_seed=42,
         emb_batch_size=64,
-        classification=False,
         foundation="facebook/esm2_t33_650M_UR50D"):
         """
         Initialize the model optimization framework.
@@ -67,9 +105,6 @@ class ModelOptimization:
             reproducible experiments.
         emb_batch_size : int, default=64
             Batch size used during sequence embedding generation.
-        classification : bool, default=False
-            Whether the task is a classification problem. If False, the
-            framework performs regression.
         foundation : str, default="facebook/esm2_t33_650M_UR50D"
             Specify which foundation model to use.
         """
@@ -81,7 +116,6 @@ class ModelOptimization:
         self.seq_col = seq_col
         self.score_col = [score_col] if isinstance(score_col, str) else score_col
         self.model_name = foundation
-        self.classification = classification
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
 
@@ -100,9 +134,7 @@ class ModelOptimization:
         Load and preprocess a sequence dataset from a CSV file.
 
         The method validates required columns, converts sequence data to
-        string format, and converts target values to numeric form. For
-        classification tasks, categorical labels are encoded using
-        ``sklearn.preprocessing.LabelEncoder``.
+        string format, and converts target values to numeric form.
 
         A mapping from sequence to target value(s) is also created for
         efficient lookup during model training.
@@ -122,7 +154,6 @@ class ModelOptimization:
         Notes
         -----
         - Supports both single-target and multi-target prediction.
-        - Classification targets are automatically label encoded.
         """
         if self.data_path.endswith((".xlsx", ".xls")):
             df = pd.read_excel(self.data_path)
@@ -131,7 +162,7 @@ class ModelOptimization:
         required_cols = set([seq_col] + score_col)
         if not required_cols.issubset(df.columns):
             raise ValueError(f"Input file must contain columns: {required_cols}. Found: {df.columns.tolist()}")
-        
+
         # Store column names of the scores
         self.target_names = score_col
 
@@ -139,24 +170,15 @@ class ModelOptimization:
         df["sequence"] = df[seq_col].astype(str)
 
         # Convert scores to float
-        if not self.classification:
-            for col in score_col:
-                df[col] = df[col].astype(float)
-        else:
-            self.label_enc = {}
-            self.n_classes = {}
-            for col in score_col:
-                le = LabelEncoder()
-                df[col] = le.fit_transform(df[col].astype(str))
-                self.label_enc[col] = le
-                self.n_classes[col] = len(le.classes_)
+        for col in score_col:
+            df[col] = df[col].astype(float)
 
         # Keep only sequence + score columns
         df = df[["sequence"] + score_col].copy()
 
         self.df = df
 
-        # Create a mapping from sequence → list of scores if multiple columns
+        # Create a mapping from sequence -> list of scores if multiple columns
         if len(score_col) == 1:
             self.seq_to_score = dict(zip(df["sequence"], df[score_col[0]]))
         else:
@@ -166,15 +188,12 @@ class ModelOptimization:
         """
         Load the pretrained protein language model used for embeddings.
 
-        The model and tokenizer are loaded from a local directory
-        bundled with the application. The model is moved to the
-        configured device (GPU if available) and set to evaluation mode.
+        The model and tokenizer are loaded and moved to the configured device
+        (GPU if available) and set to evaluation mode.
 
         Notes
         -----
-        - Uses the ESM-2 650M protein language model.
-        - Model files must exist in the packaged resource directory
-        ``models/esm-model``.
+        - Uses the ESM-2 650M protein language model by default.
         - The model is only used for feature extraction (no gradient updates).
         """
         model_source = self.model_name
@@ -186,8 +205,8 @@ class ModelOptimization:
         self.model.eval()
 
 
-    def compute_embeddings(self, 
-                           sequences, 
+    def compute_embeddings(self,
+                           sequences,
                            batch_size=None):
         """
         Convert amino acid sequences into numerical embeddings using
@@ -230,7 +249,7 @@ class ModelOptimization:
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
-                max_length=1024  
+                max_length=1024
             ).to(self.device)
 
             input_ids = encoded["input_ids"]
@@ -240,8 +259,8 @@ class ModelOptimization:
                 outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
 
-            last_layer = hidden_states[-1:] 
-            stacked = torch.stack(last_layer, dim=0) 
+            last_layer = hidden_states[-1:]
+            stacked = torch.stack(last_layer, dim=0)
             mean_layers = stacked.mean(dim=0)
 
             for j, seq in enumerate(seqs):
@@ -262,68 +281,14 @@ class ModelOptimization:
         embedding generation and model optimization.
         """
         self.training_sequences = self.df["sequence"].tolist()
-    
-    def compute_roc_auc(self, y_test, proba, label_idx):
-        """
-        Compute the ROC-AUC score for binary or multiclass classification.
 
-        The function automatically detects whether the classification
-        problem is binary or multiclass based on the number of classes
-        present in the trained model. For binary classification, the
-        probability of the positive class is used. For multiclass tasks,
-        a one-vs-rest (OvR) strategy with weighted averaging is applied.
-
-        Parameters
-        ----------
-        model : sklearn.base.ClassifierMixin
-            Trained classification model supporting the ``predict_proba`` method.
-        X_test : np.ndarray
-            Feature matrix of shape (n_samples, n_features) used for evaluation.
-        y_test : array-like
-            True class labels corresponding to ``X_test``.
-        label_idx : int
-            Index of current label of interest.
-
-        Returns
-        -------
-        float
-            Computed ROC-AUC score.
-
-        Notes
-        -----
-        - Binary classification uses the probability of the positive class.
-        - Multiclass classification uses weighted one-vs-rest ROC-AUC.
-        """
-
-        label_name = self.target_names[label_idx]
-        le = self.label_enc[label_name]
-
-        # Ensure consistent class order
-        classes = le.transform(le.classes_)
-
-        n_classes = self.n_classes[self.target_names[label_idx]]
-
-        if n_classes == 2:
-            positive_class_index = 1
-            return roc_auc_score(y_test, proba[:, positive_class_index])
-
-        else:
-            # Binarize true labels
-            y_test_bin = label_binarize(y_test, classes=classes)
-
-            # Multiclass case: One-vs-Rest
-            return roc_auc_score(
-                y_test_bin,
-                proba,
-                average="weighted",
-                multi_class="ovr"
-            )
-
-    def train(self, 
-              folds=10, 
-              random_seed=42, 
-              n_trials=100, 
-              optuna_print=True):
+    def train(self,
+              folds=10,
+              random_seed=42,
+              n_trials=100,
+              optuna_print=True,
+              trial_timeout=None,
+              study_timeout=None):
         """
         Run the full model optimization and training pipeline.
 
@@ -333,16 +298,9 @@ class ModelOptimization:
         2. Generate embeddings for all training sequences using the
         configured protein language model
         3. Create cross-validation folds
-        4. Optimize hyperparameters of downstream models using Optuna
+        4. Optimize hyperparameters of the downstream Gaussian process
+        regression model using Optuna
         5. Evaluate the optimized model using cross-validation metrics
-
-        The downstream model depends on the task type:
-
-        Regression
-            GaussianProcessRegressor
-
-        Classification
-            ExtraTreesClassifier
 
         Hyperparameters are optimized using Optuna with a
         Tree-structured Parzen Estimator (TPE) sampler.
@@ -359,6 +317,13 @@ class ModelOptimization:
             hyperparameters.
         optuna_print : bool, default=True
             Whether to display Optuna progress bars during optimization.
+        trial_timeout : float or None, default=None
+            Wall-clock seconds one Optuna trial (all CV folds) may take before
+            it is discarded. Checked inside the GPR kernel optimiser, so it also
+            interrupts a single fit that is stuck. None = no limit.
+        study_timeout : float or None, default=None
+            Wall-clock seconds the whole Optuna study (per target) may take;
+            when reached, the best trial so far is used. None = no limit.
 
         Returns
         -------
@@ -384,17 +349,14 @@ class ModelOptimization:
             - Root Mean Squared Error (RMSE)
             - Mean Absolute Error (MAE)
             - R² score
-
-        Classification metrics computed:
-            - Accuracy
-            - Balanced Accuracy
-            - F1 score (weighted)
-            - Matthews Correlation Coefficient
-            - ROC-AUC
+            - Spearman correlation
 
         Cross-validation is used to estimate performance while
-        Optuna searches the hyperparameter space.
+        Optuna searches the hyperparameter space. The Optuna limits only
+        change a result when they are actually reached (see the note at the
+        top of this module).
         """
+        global _FIT_DEADLINE
 
         self.prep_data(seq_col=self.seq_col, score_col=self.score_col)
         self.initialize_training_set()
@@ -402,7 +364,7 @@ class ModelOptimization:
         # Suppress convergence and feature name warnings
         warnings.filterwarnings('ignore', category=ConvergenceWarning)
         warnings.filterwarnings('ignore', category=UserWarning)
-        
+
         ## Seed
         random.seed(random_seed)
         np.random.seed(random_seed)
@@ -425,11 +387,8 @@ class ModelOptimization:
         self.n_targets = n_targets
         n_samples = X_train_temp.shape[0]
         folds = min(folds, n_samples)
-        
-        if self.classification:
-            cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=self.random_seed)
-        else:
-            cv = KFold(n_splits=folds, shuffle=True, random_state=random_seed)
+
+        cv = KFold(n_splits=folds, shuffle=True, random_state=random_seed)
 
         seq_to_emb = {}
         for idx, seq in enumerate(self.training_sequences):
@@ -441,9 +400,9 @@ class ModelOptimization:
 
         for label_idx in range(n_targets):
             folds_list = []
-            
-            for fold_idx, (train_idx, valid_idx) in enumerate(cv.split(seq_array) if not self.classification else cv.split(seq_array, y_train[:, label_idx])):
-            
+
+            for fold_idx, (train_idx, valid_idx) in enumerate(cv.split(seq_array)):
+
                 X_train_fold = np.array([seq_to_emb[self.training_sequences[idx]] for idx in train_idx])
                 X_val_fold = np.array([seq_to_emb[self.training_sequences[idx]] for idx in valid_idx])
 
@@ -460,43 +419,29 @@ class ModelOptimization:
                     'sequence': X_val_fold,
                     'score': y_train[valid_idx, label_idx]
                 }
-                
+
                 dataset_dict = {
                     'train': train_df,
                     'validation': val_df
                 }
-                
+
                 # Store DatasetDict for each fold
                 folds_list.append(dataset_dict)
 
             folds_per_label[f"label_{label_idx}"] = folds_list
-                
-        if not self.classification:
-            top_model = "GaussianProcessRegressor"
-            model_configs = {
-                "GaussianProcessRegressor": {"class": GaussianProcessRegressor, "params": {
-                    "alpha": ("float", 1e-10, 1e-6),
-                    "normalize_y": ("categorical", [True, False]),
-                    "kernel": ("categorical", [
-                        RBF(),
-                        Matern(),
-                        RationalQuadratic(),
-                        DotProduct()])
-                }}
-            }
-        else:
-            top_model = "ExtraTrees"
-            model_configs = {
-                "ExtraTrees": {
-                    "class": ExtraTreesClassifier,
-                    "params": {
-                        "n_estimators": ("int", 50, 300),
-                        "max_depth": ("int", 2, 15),
-                        "min_samples_split": ("int", 2, 10),
-                        "min_samples_leaf": ("int", 1, 8),
-                        "max_features": ("categorical", ["sqrt", "log2", None])
-                }}
-            }
+
+        top_model = "GaussianProcessRegressor"
+        model_configs = {
+            "GaussianProcessRegressor": {"class": GaussianProcessRegressor, "params": {
+                "alpha": ("float", 1e-10, 1e-6),
+                "normalize_y": ("categorical", [True, False]),
+                "kernel": ("categorical", [
+                    RBF(),
+                    Matern(),
+                    RationalQuadratic(),
+                    DotProduct()])
+            }}
+        }
 
         self.all_best_models = {}
         self.final_metrics = {}
@@ -511,10 +456,14 @@ class ModelOptimization:
             param_bounds = cfg["params"]
 
             self.mse_tracker = np.inf
-            self.final_loss_tracker = np.inf
-            
-            def objective(trial):
 
+            n_timed_out = [0]
+
+            def objective(trial):
+                global _FIT_DEADLINE
+
+                _FIT_DEADLINE = (time.monotonic() + trial_timeout
+                                 if trial_timeout else None)
                 try:
 
                     params = {}
@@ -528,15 +477,17 @@ class ModelOptimization:
                             params[name_] = trial.suggest_float(name_, cfg[1], cfg[2], log=True)
                         elif ptype == "categorical":
                             params[name_] = trial.suggest_categorical(name_, cfg[1])
-                    
-                    model = ModelClass(**params)
-                    
+
+                    # Same optimiser as sklearn's default, but it honours the
+                    # trial deadline when trial_timeout is set.
+                    model = ModelClass(**params, optimizer=_time_limited_lbfgs)
+
                     y_vall_all = []
                     y_pred_all = []
-                    y_pred_prob_all = []
-                    fold_scores = []
 
                     for fold_idx, dataset_dict in enumerate(folds_per_label[f"label_{label_idx}"]):
+                        if _FIT_DEADLINE is not None and time.monotonic() > _FIT_DEADLINE:
+                            raise _TrialTimeLimitExceeded()
                         model_fold = clone(model)
                         train_df = dataset_dict["train"]
                         val_df = dataset_dict["validation"]
@@ -544,81 +495,64 @@ class ModelOptimization:
                         X_train_fold = np.vstack(train_df["sequence"])
                         X_val_fold = np.vstack(val_df["sequence"])
 
-                        if not self.classification:
-                            y_train_fold = np.vstack(train_df["score"]).ravel()
-                            y_val_fold = np.vstack(val_df["score"]).ravel()
+                        y_train_fold = np.vstack(train_df["score"]).ravel()
+                        y_val_fold = np.vstack(val_df["score"]).ravel()
 
-                            model_fold.fit(X_train_fold, y_train_fold)
-                            y_pred = model_fold.predict(X_val_fold)
+                        model_fold.fit(X_train_fold, y_train_fold)
+                        y_pred = model_fold.predict(X_val_fold)
 
-                            y_val_fold = np.asarray(val_df["score"]).ravel()
+                        y_val_fold = np.asarray(val_df["score"]).ravel()
 
-                            y_vall_all.extend(y_val_fold.tolist())
-                            y_pred_all.extend(y_pred.tolist())
+                        y_vall_all.extend(y_val_fold.tolist())
+                        y_pred_all.extend(y_pred.tolist())
 
-                        else:
-                            y_train_fold = train_df["score"].astype(int)
-                            y_val_fold = val_df["score"].astype(int)
+                    mse = mean_squared_error(y_vall_all, y_pred_all)
 
-                            model_fold.fit(X_train_fold, y_train_fold)
+                    if mse < self.mse_tracker:
+                        rho, p = spearmanr(y_vall_all, y_pred_all)
+                        self.final_metrics[self.target_names[label_idx]] = {
+                            "MSE": float(mse),
+                            "RMSE": float(np.sqrt(mse)),
+                            "MAE": float(mean_absolute_error(y_vall_all, y_pred_all)),
+                            "R2": float(r2_score(y_vall_all, y_pred_all)),
+                            "Spearman correlation": float(rho)
+                        }
+                        self.mse_tracker = mse
 
-                            y_pred = model_fold.predict(X_val_fold)
-                            y_proba = model_fold.predict_proba(X_val_fold)
-                            label_enc = self.label_enc[self.target_names[label_idx]]
-                            loss = log_loss(y_val_fold, y_proba, labels=label_enc.transform(label_enc.classes_))
-                            
-                            y_vall_all.extend(y_val_fold.tolist())
-                            y_pred_all.extend(y_pred.tolist())
-                            y_pred_prob_all.append(y_proba)
+                    return mse
 
-                            fold_scores.append(loss)
-
-                    if not self.classification:
-                        mse = mean_squared_error(y_vall_all, y_pred_all)
-
-                        if mse < self.mse_tracker:
-                            rho, p = spearmanr(y_vall_all, y_pred_all)
-                            self.final_metrics[self.target_names[label_idx]] = {
-                                "MSE": float(mse),
-                                "RMSE": float(np.sqrt(mse)),
-                                "MAE": float(mean_absolute_error(y_vall_all, y_pred_all)),
-                                "R2": float(r2_score(y_vall_all, y_pred_all)),
-                                "Spearman correlation": float(rho)
-                            }
-                            self.mse_tracker = mse
-
-                        return mse
-                    else:
-                        final_loss = np.mean(fold_scores)
-                        if final_loss < self.final_loss_tracker:
-
-                            acc = accuracy_score(y_vall_all, y_pred_all)
-                            bacc = balanced_accuracy_score(y_vall_all, y_pred_all)
-                            labels = self.label_enc[self.target_names[label_idx]].transform(self.label_enc[self.target_names[label_idx]].classes_)
-                            f1 = f1_score(y_vall_all, y_pred_all, average="weighted", labels=labels)
-                            mcc = matthews_corrcoef(y_vall_all, y_pred_all)
-                            y_pred_prob_all = np.vstack(y_pred_prob_all)
-                            roc_auc = self.compute_roc_auc(y_vall_all, y_pred_prob_all, label_idx)
-                            
-                            self.final_metrics[self.target_names[label_idx]] = {
-                                "Accuracy": float(acc),
-                                "Balanced_Accuracy": float(bacc),
-                                "F1_weighted": float(f1),
-                                "MCC": float(mcc),
-                                "ROC_AUC": float(roc_auc)
-                            }
-                            self.final_loss_tracker = final_loss
-
-                        return final_loss
+                except _TrialTimeLimitExceeded:
+                    n_timed_out[0] += 1
+                    print(f"  Trial {trial.number} stopped after {trial_timeout} s "
+                          f"(kernel={params.get('kernel')}, "
+                          f"alpha={params.get('alpha', float('nan')):.3g}, "
+                          f"normalize_y={params.get('normalize_y')})", flush=True)
+                    raise optuna.TrialPruned()
                 except Exception as e:
                     print("Trial failed:", e)
                     raise optuna.TrialPruned()
+                finally:
+                    _FIT_DEADLINE = None
 
-            optuna.logging.set_verbosity(optuna.logging.ERROR) 
+            optuna.logging.set_verbosity(optuna.logging.ERROR)
             study = optuna.create_study(direction='minimize', sampler=optuna.samplers.TPESampler(seed=random_seed))
-            study.optimize(objective, n_trials=n_trials, show_progress_bar=optuna_print)
-            
-            best_params = study.best_params 
+            study.optimize(objective, n_trials=n_trials, timeout=study_timeout,
+                           show_progress_bar=optuna_print)
+
+            completed = [t for t in study.trials
+                         if t.state == optuna.trial.TrialState.COMPLETE]
+            if study_timeout is not None and len(study.trials) < n_trials:
+                print(f"  Study time limit ({study_timeout} s) reached after "
+                      f"{len(study.trials)} trials.", flush=True)
+            if n_timed_out[0]:
+                print(f"  {n_timed_out[0]} trial(s) hit the trial time limit "
+                      f"({trial_timeout} s).", flush=True)
+            if not completed:
+                raise RuntimeError(
+                    "No Optuna trial completed within the given limits. Increase "
+                    "trial_timeout / study_timeout, or leave them as None.")
+
+            best_params = study.best_params
 
             best_model = ModelClass(**best_params)
 
@@ -629,7 +563,7 @@ class ModelOptimization:
             gc.collect()
 
         return self.final_metrics
-    
+
     def pred(self, test_seqs_path, seq_col="sequence"):
         """
         Generate predictions for new sequences using the optimized models.
@@ -638,8 +572,6 @@ class ModelOptimization:
         embeddings using the pretrained protein language model,
         and applies the optimized models obtained during training
         to generate predictions.
-
-        The method supports both regression and classification tasks.
 
         Parameters
         ----------
@@ -654,8 +586,7 @@ class ModelOptimization:
             DataFrame containing:
 
             - Input sequences
-            - Predicted values (regression) or predicted labels (classification)
-            - Class probabilities (classification only)
+            - Predicted numeric score for each target.
 
         Raises
         ------
@@ -670,17 +601,8 @@ class ModelOptimization:
         2. Validate required columns
         3. Compute embeddings for training and test sequences
         4. Standardize feature representations
-        5. Train the optimized model for each target label
+        5. Fit the optimized model for each target label
         6. Generate predictions for test sequences
-
-        Classification outputs include:
-
-            - Predicted class label
-            - Probability for each class
-
-        Regression outputs include:
-
-            - Predicted numeric score for each target.
         """
         if test_seqs_path.endswith((".xlsx", ".xls")):
             df = pd.read_excel(test_seqs_path)
@@ -712,33 +634,7 @@ class ModelOptimization:
             model = clone(self.all_best_models[label])
             model.fit(X_train, target_train)
 
-            if not self.classification:
-                pred_scores = model.predict(X_test)
-                df_pred[f'pred_{label}'] = pred_scores
-            else:
-                pred_labels = model.predict(X_test)
-
-                # probabilities (if available)
-                if hasattr(model, "predict_proba"):
-                    pred_proba = model.predict_proba(X_test)
-                    classes = model.classes_
-                else:
-                    # fallback if classifier has no predict_proba
-                    pred_proba = None
-                    classes = None
-
-                # inverse transform labels
-                le = self.label_enc[self.target_names[label_idx]]
-                pred_labels_tra = le.inverse_transform(pred_labels)
-
-                # Save predicted label
-                df_pred[f'pred_{label}'] = pred_labels_tra
-                df_pred[f'pred_encoded_{label}'] = pred_labels
-
-                # Save probabilities per class
-                if pred_proba is not None:
-                    for i, cls in enumerate(classes):
-                        df_pred[f'prob_{label}_{cls}'] = pred_proba[:, i]
+            pred_scores = model.predict(X_test)
+            df_pred[f'pred_{label}'] = pred_scores
 
         return df_pred
-    

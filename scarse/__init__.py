@@ -6,16 +6,17 @@ import pandas as pd
 scarse_env = None
 
 def train(data_path,
-          classification,
           seq_col,
           score_col,
           random_seed=42,
           folds=10,
-          n_trials=100, 
+          n_trials=100,
           foundation="facebook/esm2_t33_650M_UR50D",
-          optuna_print=True):
+          optuna_print=True,
+          trial_timeout=None,
+          study_timeout=None):
     """
-    Train and optimize models using sequence embeddings.
+    Train and optimize SCARSE (regression) using sequence embeddings.
 
     This function initializes a global optimization environment and
     executes the full training pipeline, including dataset loading,
@@ -29,15 +30,10 @@ def train(data_path,
     ----------
     data_path : str
         Path to the training dataset (CSV format).
-    classification : bool
-        Whether the task is a classification problem.
-
-        - ``True`` → classification models are trained.
-        - ``False`` → regression models are trained.
     seq_col : str
         Name of the column containing amino acid sequences.
     score_col : str or list of str
-        Name(s) of the column(s) containing target values.
+        Name(s) of the column(s) containing target values (regression).
     random_seed : int, default=42
         Random seed used for reproducibility.
     folds : int, default=10
@@ -48,6 +44,12 @@ def train(data_path,
         Specify which foundation model to use.
     optuna_print : bool, default=True
         Whether to display Optuna progress output.
+    trial_timeout : float or None, default=None
+        Wall-clock seconds a single Optuna trial (all CV folds) may take before
+        it is discarded. None = no limit.
+    study_timeout : float or None, default=None
+        Wall-clock seconds the whole Optuna search (per target) may take before
+        it stops and keeps the best trial so far. None = no limit.
 
     Returns
     -------
@@ -60,25 +62,26 @@ def train(data_path,
     stores the trained models and configuration. This environment
     must exist before calling :func:`pred`.
     """
-    
+
     global scarse_env
 
     validate_sequences(data_path, seq_col)
 
-    validate_training_targets(data_path, score_col, classification)
+    validate_training_targets(data_path, score_col)
 
-    scarse_env = scarse.ModelOptimization(data_path=data_path, 
+    scarse_env = scarse.ModelOptimization(data_path=data_path,
                                           seq_col=seq_col,
                                           score_col=score_col,
-                                          random_seed=random_seed, 
-                                          classification=classification,
+                                          random_seed=random_seed,
                                           foundation=foundation)
 
-    cv_performance = scarse_env.train(folds, random_seed, n_trials, optuna_print)
+    cv_performance = scarse_env.train(folds, random_seed, n_trials, optuna_print,
+                                      trial_timeout=trial_timeout,
+                                      study_timeout=study_timeout)
 
     return cv_performance
 
-def pred(data_path, 
+def pred(data_path,
          seq_col):
     """
     Generate predictions for new sequences using trained models.
@@ -114,7 +117,7 @@ def pred(data_path,
     global scarse_env
     if scarse_env is None:
         raise RuntimeError("You must call train() before pred().")
-    
+
     validate_sequences(data_path, seq_col)
 
     df_pred = scarse_env.pred(data_path, seq_col)

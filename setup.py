@@ -13,10 +13,10 @@ install_requires = [
 
 setup(
     name="scarse",
-    version="1.0.0",
+    version="2.0.0",
     author="Leo Andrekson, Robin Rydbergh, Rocío Mercado, Michaela Wenzel",
     author_email="leo.andrekson@chalmers.se, robin.rydbergh@chalmers.se, rocom@chalmers.se, wenzelm@chalmers.se",
-    description="A package for training SCARSE on small sample sizes of peptide sequences that can later be used to predict peptide properties of unseen peptides. Making SCARSE perfectly suited for AI-infused peptide engineering.",
+    description="A package for training SCARSE on small sample sizes of peptide sequences that can later be used to predict peptide properties of unseen peptides via regression. Making SCARSE perfectly suited for AI-infused peptide engineering.",
     long_description=description,
     long_description_content_type="text/markdown",
     url="https://github.com/LeoAnd00/scarse",

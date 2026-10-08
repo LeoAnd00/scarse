@@ -1,10 +1,10 @@
-# SCARSE: Small-sample Classification And Regression Solution for low-resource peptide Engineering
+# SCARSE: Small-sample Cross-validation-Anchored Regression Solution for low resource peptide Engineering
 <p align="center">
   <img src="figures/scarse_banner.png" alt="Workflow Diagram" style="width: 100%; height: auto;" />
 </p>
 
 ## Abstract
-Reliable estimation of downstream performance in low-data peptide machine learning is critical for guiding early-stage AI-driven peptide engineering. Yet, it is often unclear how to assess whether a model will be effective in iterative discovery settings. Here, we show that the cross validation R² score can serve as a simple and robust proxy for predicting active learning workflow performance, enabling early-stage evaluation of model suitability for sequential peptide optimization. To support this, we introduce SCARSE, a machine learning framework combining ESM-2 protein language model embeddings with Gaussian process regression and extremely randomized trees classification, designed for low-resource peptide property prediction (20–500 training samples). We benchmark SCARSE across 23 peptide and small-protein datasets covering substitution and indel variants, antimicrobial peptides, cell-penetrating peptides, and toxic/non-toxic peptides. SCARSE significantly outperforms a hand-engineered descriptor baseline on substitution and indel tasks, while comparable performance was achieved on shorter peptide non-mutant datasets where simpler descriptors capture enough of the signal. In simulated active learning workflows, SCARSE consistently outperforms baseline and random sampling strategies. Notably, we demonstrate that CV R² computed from as few as 50 labeled peptides can be sufficient to estimate final active learning end-point performance, providing a practical, data-efficient criterion for deciding whether a given dataset combined with SCARSE is suitable for iterative peptide discovery. SCARSE is released as a pip package and is available via HuggingFace Spaces to facilitate integration into peptide engineering workflows.
+Reliable estimation of downstream performance in low-data peptide machine learning is critical for guiding early-stage AI-driven peptide engineering, yet it is often unclear how to assess whether a model will be effective in iterative discovery settings. Here we ask whether a cross-validation score computed on a handful of labelled peptides can serve as a simple and robust proxy for how well an active-learning workflow built on that model will eventually perform. To support this we introduce SCARSE, a machine learning framework combining ESM-2 protein language model embeddings with Gaussian process regression, designed for low-resource peptide property prediction (20–500 training samples). We benchmark SCARSE across 24 peptide and small-protein datasets covering substitution variants, indel variants, antimicrobial peptide potency and haemolytic activity, against three hand-engineered baselines — physicochemical descriptors, Morgan fingerprints and character n-grams — and across four ESM-2 checkpoints from 8M to 650M parameters. In simulated active learning workflows, SCARSE consistently outperforms the baseline and random sampling strategies. Notably, we demonstrate that CV R² computed from as few as 50 labeled peptides can be sufficient to estimate final active learning end-point performance, providing a practical, data-efficient criterion for deciding whether a given dataset combined with SCARSE is suitable for iterative peptide discovery. SCARSE is released as a pip package and is available via HuggingFace Spaces to facilitate integration into peptide engineering workflows.
 
 ## Hugging Face Spaces
 
@@ -22,20 +22,20 @@ The workflow consists of the following steps:
 1. **Input data**
    - A CSV file containing peptide sequences and one or more target variables.
    - The sequence column (`seq_col`) should contain amino acid sequences.
-   - The target column(s) (`score_col`) contain regression values or class labels.
+   - The target column(s) (`score_col`) contain regression values.
 
 2. **Sequence embedding**
    - Sequences are converted into numerical representations using the ESM-2 protein language model.
 
-3. **Model selection**
-   - Depending on the task:
-     - **Regression** → Gaussian Process Regression  
-     - **Classification** → Extremely Randomized Trees  
-   - These models are chosen for robustness in small-sample settings.
+3. **Model**
+   - Gaussian Process Regression is used as the downstream model, chosen for its robustness in small-sample settings.
 
 4. **Hyperparameter optimization**
    - Models are tuned using cross-validation and Optuna-based optimization.
    - The number of folds and optimization trials can be controlled by the user.
+   - Optional wall-clock limits on the Optuna search are available
+     (`trial_timeout` for a single trial, `study_timeout` for the whole search);
+     both default to no limit.
 
 5. **Training output**
    - Cross-validation performance metrics are returned.
@@ -69,24 +69,28 @@ pip install scarse
 
 ## Usage
 
-### For training on regression problem:
+### For training a regression model:
 ```
 import scarse
 
-scarse.train(data_path="../app/train.csv", 
-             classification=False, 
+scarse.train(data_path="../app/train.csv",
              seq_col="sequence",
              score_col=["score"])
 ```
-### For training on classification problem:
+
+### Optional Optuna time limits:
 ```
 import scarse
 
-scarse.train(data_path="../app/train.csv", 
-             classification=True, 
+# Cap a single trial at 600 s and the whole search at 3600 s.
+# Both default to None (no limit).
+scarse.train(data_path="../app/train.csv",
              seq_col="sequence",
-             score_col=["classes"])
+             score_col=["score"],
+             trial_timeout=600,
+             study_timeout=3600)
 ```
+
 ### For predicting after model have been trained:
 ```
 df_pred = scarse.pred(data_path="../app/test.csv", seq_col="sequence")
@@ -100,7 +104,6 @@ See the following tutorial, structured as a Python notebook:
 Below we illustrate the relation between CV R² score and end-point active learning performance. <br>
 The y-axis display how many times better performance SCARSE guided active learning delivers compared to random sampling when looking at the accumulation of top 10% of peptides. <br>
 By comparing the CV R² score of your data to the corresponding figure below for your dataset size one can get and indication of how suitable your data is combined with SCARSE to perform active learning peptide engineering. <br>
-Note that this can only be used as a guide to evaluate regression problem performance. <br>
 
 <p align="center">
   <img src="figures/active_learning_performance.png" alt="Workflow Diagram" width="500"/>
@@ -109,4 +112,3 @@ Note that this can only be used as a guide to evaluate regression problem perfor
 ## Citation
 If using this work, please cite: <br>
 Andrekson L, Rydbergh R, Mercado R, Wenzel M. AI-guided discovery for low-resource peptide engineering using evolutionary scale modeling. bioRxiv. 2026. https://doi.org/10.64898/2026.06.25.734678.
-
