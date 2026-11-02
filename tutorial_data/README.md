@@ -1,8 +1,8 @@
 # Tutorial
 
-The regression and classification training and testing data are random subsets of the POLG_PESV dataset.<br>
+The regression training and testing data are random subsets of the POLG_PESV dataset.<br>
+The "sequence" column contains the protein sequence of each variant.<br>
+The "mutant" column describes the mutation(s) of each variant.<br>
 The "score" column is the original endpoint of POLG_PESV.<br>
-The "score_2" column is just a copie of the "score" column but with gaussian noise added with a std=0.1.<br>
-The "score_binary_class" column consist of when dividing the data into "low" (bottom 50% of data) and "high" (top 50% of data).<br>
-The "score_binary_class_random" column consist of fully randomly assigned classes.<br>
-The "score_multi_class" column consist of when dividing the data into "low" (bottom 25% of data), "medium" (between 25-75% of data) and "high" (top 25% of data).
+The "score_2" column is a copy of the "score" column with Gaussian noise added (std = 0.1).<br>
+The "score_shuffled" column (training data only) is the "score" column randomly permuted across sequences (seed = 42). It serves as a negative control: a model trained on it should show no real predictive performance (R² ≈ 0) on the test set.
