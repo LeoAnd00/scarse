@@ -1,5 +1,7 @@
 # Tutorial
 
+![SCARSE tutorial workflow](../figures/tutorial_workflow.png)
+
 The regression training and testing data are random subsets of the POLG_PESV dataset.<br>
 The "sequence" column contains the protein sequence of each variant.<br>
 The "mutant" column describes the mutation(s) of each variant.<br>
